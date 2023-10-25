@@ -89,10 +89,9 @@ int crack_single_password(uint8_t *input_hash, char *output) {
 }
 
 /********************* Parts B & C ************************/
-#define DIGIT_IDX_OFFSET 48    // Unicode of '0'
-#define LETTER_IDX_OFFSET 87   // Unicoode of 'a'
-#define MD5_STRING_LENGTH 32   // Length of an MD5 string
-#define MD5_NUM_CHARS (26 + 9) // Number of possible characters in an MD5 string
+#define DIGIT_IDX_OFFSET 48  // Unicode of '0'
+#define LETTER_IDX_OFFSET 87 // Unicoode of 'a'
+#define MD5_NUM_CHARS 256    // Number of possible characters in an MD5 string
 
 /**
  * A struct of a Trie node
@@ -102,20 +101,9 @@ typedef struct trie_node {
   struct trie_node *paths[MD5_NUM_CHARS];
 
   // Data contained at this node
-  char *data;
+  char data[MAX_USERNAME_LENGTH];
 
 } trie_node_t;
-
-/**
- * Maps a character to an index in an
- * representing paths in a trie
- *
- * @param c Character to convert
- * @return int Index in an array of trie paths
- */
-int char_to_idx(char c) {
-  return c - (isdigit(c) ? DIGIT_IDX_OFFSET : LETTER_IDX_OFFSET);
-}
 
 /**
  * Initializes a trie node
@@ -128,7 +116,6 @@ void create(trie_node_t **trie) {
   for (int i = 0; i < MD5_NUM_CHARS; i++) {
     (*trie)->paths[i] = NULL;
   }
-  (*trie)->data = NULL;
 }
 
 /**
@@ -139,14 +126,14 @@ void create(trie_node_t **trie) {
  * @param key Key that signifies path to follow in trie
  * @param val Value to be inserted at end of path
  */
-void insert(trie_node_t *trie, char *key, char *val) {
+void insert(trie_node_t *trie, uint8_t *key, char *val) {
   trie_node_t *cur_trie = trie;
 
   // Traverse tree till leaf
-  for (int i = 0; i < MD5_STRING_LENGTH; i++) {
+  for (int i = 0; i < MD5_DIGEST_LENGTH; i++) {
 
     // Determine path to follow
-    int path = char_to_idx(key[i]);
+    int path = key[i];
 
     // Allocate space if needed
     if (cur_trie->paths[path] == NULL) {
@@ -158,16 +145,17 @@ void insert(trie_node_t *trie, char *key, char *val) {
   }
 
   // Add data to leaf
-  cur_trie->data = malloc(strlen(val));
-  cur_trie->data = strdup(val);
+  // // Either this or strcpy
+  memcpy(cur_trie->data, val, strlen(val));
+  cur_trie->data[strlen(val)] = '\0';
 }
 
-bool find(trie_node_t *trie, char *key) {
+bool find(trie_node_t *trie, uint8_t *key) {
   trie_node_t *cur_trie = trie;
 
-  for (int i = 0; i < MD5_STRING_LENGTH; i++) {
+  for (int i = 0; i < MD5_DIGEST_LENGTH; i++) {
     // Determine path to follow
-    int path = char_to_idx(key[i]);
+    int path = key[i];
 
     // Terminate if no data is found
     if (cur_trie->paths[path] == NULL)
@@ -221,17 +209,10 @@ int num_passwords = 0;
  *                       must make a copy of this value if you retain it in
  *                        your data structure.
  */
-void add_password(trie_node_t *passwords, char *username, char *password_hash) {
-  // Allocate space for username and hash
-  char *user = malloc(sizeof(char) * strlen(username));
-  char *hash = malloc(sizeof(char) * MD5_STRING_LENGTH);
-
-  // Create copies
-  user = strdup(username);
-  hash = strdup(password_hash);
-
+void add_password(trie_node_t *passwords, char *username,
+                  uint8_t *password_hash) {
   // Insert into trie
-  insert(passwords, hash, user);
+  insert(passwords, password_hash, username);
 
   // Increment password count
   num_passwords += 1;
@@ -256,14 +237,9 @@ int rec_crack_password(trie_node_t *passwords, int length, char password[]) {
     // Do the hash
     MD5((unsigned char *)password, PASSWORD_LENGTH, candidate_hash);
 
-    // Get string representation of MD5
-    char md5_string[MD5_STRING_LENGTH + 1];
-    for (int i = 0; i < 16; ++i)
-      sprintf(&md5_string[i * 2], "%02x", (unsigned int)candidate_hash[i]);
-
     // Now check if the password set contains the hash of the candidate
     // password
-    if (find(passwords, md5_string)) {
+    if (find(passwords, candidate_hash)) {
       // Match! Print the username and cracked password
       // Return 1 because we cracked 1 password
       printf("%s\n", password);
@@ -448,7 +424,7 @@ int main(int argc, char **argv) {
       char md5_string[MD5_DIGEST_LENGTH * 2 + 1];
 
       // Make space to hold the MD5 bytes
-      // uint8_t password_hash[MD5_DIGEST_LENGTH];
+      uint8_t password_hash[MD5_DIGEST_LENGTH];
 
       // Try to read. The space in the format string is required to eat the
       // newline
@@ -457,14 +433,14 @@ int main(int argc, char **argv) {
         exit(2);
       }
 
-      // // Convert the MD5 string to MD5 bytes in our new node
-      // if (md5_string_to_bytes(md5_string, password_hash) != 0) {
-      //   fprintf(stderr, "Error reading MD5\n");
-      //   exit(2);
-      // }
+      // Convert the MD5 string to MD5 bytes in our new node
+      if (md5_string_to_bytes(md5_string, password_hash) != 0) {
+        fprintf(stderr, "Error reading MD5\n");
+        exit(2);
+      }
 
       // Add the password to the password set
-      add_password(passwords, username, md5_string);
+      add_password(passwords, username, password_hash);
       password_count++;
     }
 
