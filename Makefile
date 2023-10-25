@@ -15,7 +15,7 @@ clean:
 	rm -rf password-cracker password-cracker.dSYM
 
 password-cracker: password-cracker.c
-	$(CC) $(CFLAGS) -o password-cracker password-cracker.c -lcrypto -lpthread -lm
+	$(CC) $(CFLAGS) -o password-cracker password-cracker.c -lcrypto -lpthread -lm -fsanitize=address
 
 zip:
 	@echo "Generating password-cracker.zip file to submit to Gradescope..."

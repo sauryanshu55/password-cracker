@@ -89,12 +89,14 @@ int crack_single_password(uint8_t *input_hash, char *output) {
 
 /********************* Parts B & C ************************/
 
+// Global book-keeping of the number of cracked passwords at the current time
+// This is shared across threads, hence the associated lock
+int num_cracked = 0;
+pthread_mutex_t lock;
+
 /**
  * This struct is the root of the data structure that will hold users and hashed
- * passwords. This could be any type of data structure you choose: list, array,
- * tree, hash table, etc. Implement this data structure for part B of the lab.
- * TODO: Make this a hash table, maybe. Then document.
- *
+ * passwords.
  */
 typedef struct password_set {
   char **usernames;
@@ -108,8 +110,9 @@ typedef struct password_set {
 typedef struct thread_arg {
   int start;                 // The starting ASCII character
   int stop;                  // The ending ASCII character
-  int num_cracked;           // Stores the number of passwords cracked
   password_set_t *passwords; // Pointer to the set of passwords to crack
+  pthread_t threads[NUM_THREADS];
+  pthread_t thread_id;
 } thread_arg_t;
 
 /**
@@ -119,8 +122,8 @@ typedef struct thread_arg {
  * \param passwords  A pointer to allocated memory that will hold a password set
  */
 void init_password_set(password_set_t *passwords) {
-  passwords->usernames = malloc(sizeof(char **));
-  passwords->hashed_passwords = malloc(sizeof(char **));
+  passwords->usernames = malloc(sizeof(char *));
+  passwords->hashed_passwords = malloc(sizeof(char *));
   passwords->size = 0;
 };
 
@@ -185,10 +188,10 @@ void add_password(password_set_t *passwords, char *username,
  * @param passwords_set Set of usernames and passwords
  * @param length Length of the current `password`
  * @param password The candidate password to match
- * @return The number of passwords cracked
  */
-int try_crack_list_password(password_set_t *passwords_set, int length,
-                            char password[]) {
+void try_crack_list_password(password_set_t *passwords, int length,
+                             char password[], pthread_t threads[],
+                             pthread_t thread_id) {
 
   // Base Case: Password is at desired length. Try it!
   if (length == 0) {
@@ -199,35 +202,55 @@ int try_crack_list_password(password_set_t *passwords_set, int length,
     MD5((unsigned char *)password, PASSWORD_LENGTH, candidate_hash);
 
     // Now check if the password set contains the hash of the candidate password
-    for (int i = 0; i < passwords_set->size; i++) {
-      if (memcmp(passwords_set->hashed_passwords[i], candidate_hash,
+    for (int i = 0; i < passwords->size; i++) {
+      if (memcmp(passwords->hashed_passwords[i], candidate_hash,
                  MD5_DIGEST_LENGTH) == 0) {
         // Match! Print the username and cracked password
-        // Return 1 because we cracked 1 password
-        printf("%s ", passwords_set->usernames[i]);
+        printf("%s ", passwords->usernames[i]);
         printf("%s\n", password);
-        return 1;
+
+        // Increment number of cracked passwords
+        pthread_mutex_lock(&lock);
+        num_cracked++;
+
+        // Cancel other threads if all passwords have been cracked.
+        if (num_cracked == passwords->size) {
+          for (int i = 0; i < NUM_THREADS; i++) {
+            if (threads[i] != thread_id) {
+              pthread_cancel(threads[i]);
+            }
+          }
+
+          // Exit prematurely
+          pthread_exit(NULL);
+        }
+
+        pthread_mutex_unlock(&lock);
       }
     }
 
-    // No match found. Return 0 because we cracked 0 passwords
-    return 0;
+    // No match found. Return
+    return;
   }
 
   // Try all letters for next position of password
-  int num_cracked = 0;
   for (int ascii = ASCII_LOWERCASE_A; ascii <= ASCII_LOWERCASE_Z; ascii++) {
     // Append current letter to password
     password[PASSWORD_LENGTH - length] = (char)ascii;
 
     // Recursive call. Track the number of cracked passwords
-    num_cracked += try_crack_list_password(passwords_set, length - 1, password);
+    try_crack_list_password(passwords, length - 1, password, threads,
+                            thread_id);
   }
-
-  // Return the number of passwords cracked
-  return num_cracked;
 }
 
+/**
+ * Function to be run by each thread to crack passwords
+ * in its corresponding search space
+ *
+ * @param _args Arguments to the thread
+ * @return void* Thread exits
+ */
 void *crack_password_worker(void *_args) {
   // Buffer to store password. Null-terminated.
   char password_candidate[PASSWORD_LENGTH + 1];
@@ -240,8 +263,8 @@ void *crack_password_worker(void *_args) {
   for (int ascii = args->start; ascii <= args->stop; ascii++) {
     // Generate permutations starting with `ascii`
     password_candidate[0] = ascii;
-    args->num_cracked += try_crack_list_password(
-        args->passwords, PASSWORD_LENGTH - 1, password_candidate);
+    try_crack_list_password(args->passwords, PASSWORD_LENGTH - 1,
+                            password_candidate, args->threads, args->thread_id);
   }
 
   // Exit thread when done
@@ -251,10 +274,7 @@ void *crack_password_worker(void *_args) {
 /**
  * Crack all of the passwords in a set of passwords. The function should
  * print the username and cracked password for each user listed in
- * passwords, separated by a space character. Complete this implementation
- * for part B of
- *
- * TODO: More comments
+ * passwords, separated by a space character.
  *
  * \returns The number of passwords cracked in the list
  */
@@ -271,12 +291,15 @@ int crack_password_list(password_set_t *passwords) {
   pthread_t threads[NUM_THREADS];
   thread_arg_t args[NUM_THREADS];
 
-  // Set arguments to pass to thread
   for (int i = 0; i < NUM_THREADS; i++) {
+    // Set arguments to pass to threads
     args[i].start = search_start[i];
     args[i].stop = search_stop[i];
-    args[i].num_cracked = 0;
     args[i].passwords = passwords;
+    args[i].thread_id = threads[i];
+    for (int i = 0; i < NUM_THREADS; i++) {
+      args[i].threads[i] = threads[i];
+    }
 
     if (pthread_create(&threads[i], NULL, crack_password_worker, &args[i])) {
       perror("pthread create failed");
@@ -284,23 +307,19 @@ int crack_password_list(password_set_t *passwords) {
     }
   }
 
-  // Join threads. Count the number of cracked passwords
-  int total_cracked = 0;
+  // Join threads
   for (int i = 0; i < NUM_THREADS; i++) {
     if (pthread_join(threads[i], NULL)) {
       perror("pthread join failed");
       exit(EXIT_FAILURE);
     }
-
-    // Aggregate number of cracked passwords
-    total_cracked += args[i].num_cracked;
   }
 
-  // Free password set
+  // Clean up malloc-ed memory
   free_password_set(passwords);
 
   // Return the number of passwords cracked
-  return total_cracked;
+  return num_cracked;
 }
 
 /******************** Provided Code ***********************/
