@@ -1,7 +1,6 @@
 #define _GNU_SOURCE
 #include <openssl/md5.h>
 #include <pthread.h>
-#include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -11,10 +10,11 @@
 #define MAX_USERNAME_LENGTH 64
 #define PASSWORD_LENGTH 6
 
-#define ASCII_LOWERCASE_A 97
-#define ASCII_LOWERCASE_Z 122
-
 #define NUM_THREADS 4
+
+#define ASCII_LOWER_A 97
+#define ASCII_LOWER_Z 122
+#define NUM_UNSIGNED_CHARS 256
 
 /************************* Part A *************************/
 
@@ -37,9 +37,9 @@ int try_crack_single_password(uint8_t *input_hash, char *output, int length,
     // Do the hash
     MD5((unsigned char *)password, PASSWORD_LENGTH, candidate_hash);
 
-    // Now check if the hash of the candidate password matches the input hash
+    // Check if the hash of the candidate password matches the input hash
     if (memcmp(input_hash, candidate_hash, MD5_DIGEST_LENGTH) == 0) {
-      // Match! Copy the password to the output and return 0 (success)
+      // Match! Copy to output and return 1 (success)
       strncpy(output, password, PASSWORD_LENGTH + 1);
       return 0;
     } else {
@@ -49,17 +49,17 @@ int try_crack_single_password(uint8_t *input_hash, char *output, int length,
   }
 
   // Recursive case: Try all letters for next position of password
-  for (int ascii = ASCII_LOWERCASE_A; ascii <= ASCII_LOWERCASE_Z; ascii++) {
+  for (int ascii = ASCII_LOWER_A; ascii <= ASCII_LOWER_Z; ascii++) {
     // Append current letter to password
     password[PASSWORD_LENGTH - length] = (char)ascii;
 
-    // Recursive call. Returns 0 if there is a match, -1 if there is not for the
-    // passowrd provided as input
+    // Recursive call
     int cracked =
         try_crack_single_password(input_hash, output, length - 1, password);
 
+    // Terminate if cracked password
     if (cracked == 0) {
-      return cracked; // Hashes match. Exit recursion prematurely!
+      return cracked;
     }
   }
 
@@ -95,54 +95,107 @@ int num_cracked = 0;
 pthread_mutex_t lock;
 
 /**
- * This struct is the root of the data structure that will hold users and hashed
- * passwords.
+ * A struct of a Trie node
  */
-typedef struct password_set {
-  char **usernames;
-  uint8_t **hashed_passwords;
-  int size;
-} password_set_t;
+typedef struct trie_node {
+  // An array of paths that are trie nodes
+  struct trie_node *paths[NUM_UNSIGNED_CHARS];
+
+  // Data contained at this node
+  char data[MAX_USERNAME_LENGTH];
+
+} trie_node_t;
+
+/**
+ * Initializes a trie node
+ *
+ * \param trie  A pointer to that will hold a trie
+ */
+// TODO: Is there a better way? How to pass a pointer to allocated memory?
+void create(trie_node_t **trie) {
+  // Allocate memory for trie
+  *trie = malloc(sizeof(trie_node_t));
+
+  // Initialize all paths
+  for (int i = 0; i < NUM_UNSIGNED_CHARS; i++) {
+    (*trie)->paths[i] = NULL;
+  }
+}
+
+/**
+ * Inserts a value into a path in a trie
+ * determined by following the key
+ *
+ * @param trie Trie to insert into
+ * @param key Key that signifies path to follow in trie
+ * @param val Value to be inserted at end of path
+ */
+void insert(trie_node_t *trie, uint8_t *key, char *val) {
+  trie_node_t *cur_trie = trie;
+
+  // Traverse tree till leaf
+  for (int i = 0; i < MD5_DIGEST_LENGTH; i++) {
+    // Determine path to follow
+    int path = key[i];
+
+    // Allocate space if needed
+    if (cur_trie->paths[path] == NULL) {
+      create(&cur_trie->paths[path]);
+    }
+
+    // Follow path
+    cur_trie = cur_trie->paths[path];
+  }
+
+  // Add data to leaf
+  memcpy(cur_trie->data, val, strlen(val));
+  cur_trie->data[strlen(val)] = '\0';
+}
+
+/**
+ * Finds the value associated with a key in the trie
+ *
+ * @param trie A trie to search
+ * @param key The key to search for
+ * @return int Whether a value is found (1) or not (0)
+ */
+int find(trie_node_t *trie, uint8_t *key) {
+  trie_node_t *cur_trie = trie;
+
+  // Traverse tree
+  for (int i = 0; i < MD5_DIGEST_LENGTH; i++) {
+    // Determine path to follow
+    int path = key[i];
+
+    // Terminate if no data is found
+    if (cur_trie->paths[path] == NULL)
+      return 0;
+
+    // Follow path
+    cur_trie = cur_trie->paths[path];
+  }
+
+  // At leaf node. Print data
+  printf("%s ", cur_trie->data);
+  return 1;
+}
 
 /**
  * Struct containing arguments passed to a thread
  */
 typedef struct thread_arg {
-  int start;                 // The starting ASCII character
-  int stop;                  // The ending ASCII character
-  password_set_t *passwords; // Pointer to the set of passwords to crack
-  pthread_t threads[NUM_THREADS];
-  pthread_t thread_id;
+  int start;              // The starting ASCII character
+  int stop;               // The ending ASCII character
+  trie_node_t *passwords; // Pointer to the set of passwords to crack
 } thread_arg_t;
 
-/**
- * Initialize a password set.
- * Complete this implementation for part B of the lab.
- *
- * \param passwords  A pointer to allocated memory that will hold a password set
- */
-void init_password_set(password_set_t *passwords) {
-  passwords->usernames = malloc(sizeof(char *));
-  passwords->hashed_passwords = malloc(sizeof(char *));
-  passwords->size = 0;
-};
+// Total number of passwords to crack
+int count_passwords = 0;
 
-/**
- * Frees the fields of a password_set_t struct
- *
- * @param passwords Struct to free
- */
-void free_password_set(password_set_t *passwords) {
-  // Free individual usernames and passwords
-  for (int i = 0; i < passwords->size; i++) {
-    free(passwords->usernames[i]);
-    free(passwords->hashed_passwords[i]);
-  }
-
-  // Free the struct array fields
-  free(passwords->usernames);
-  free(passwords->hashed_passwords);
-}
+// Number of passwords already cracked
+// This resource is shared across threads
+pthread_mutex_t count_lock = PTHREAD_MUTEX_INITIALIZER;
+int count_cracked = 0;
 
 /**
  * Add a password to a password set
@@ -160,25 +213,13 @@ void free_password_set(password_set_t *passwords) {
  *                       must make a copy of this value if you retain it in
  *                        your data structure.
  */
-void add_password(password_set_t *passwords, char *username,
+void add_password(trie_node_t *passwords, char *username,
                   uint8_t *password_hash) {
-  // Ask allocator for more space if necessary
-  passwords->usernames =
-      realloc(passwords->usernames, sizeof(char *) * (passwords->size + 1));
-  passwords->hashed_passwords = realloc(
-      passwords->hashed_passwords, sizeof(uint8_t *) * (passwords->size + 1));
+  // Insert into trie
+  insert(passwords, password_hash, username);
 
-  // Allocate space for a single username and password
-  passwords->usernames[passwords->size] =
-      malloc(sizeof(char) * strlen(username));
-  passwords->hashed_passwords[passwords->size] =
-      malloc(sizeof(uint8_t) * MD5_DIGEST_LENGTH);
-
-  // Store username and hashed password in password set
-  passwords->usernames[passwords->size] = strdup(username);
-  memcpy(passwords->hashed_passwords[passwords->size], password_hash,
-         MD5_DIGEST_LENGTH);
-  passwords->size++;
+  // Increment password count
+  count_passwords += 1;
 }
 
 /**
@@ -189,9 +230,7 @@ void add_password(password_set_t *passwords, char *username,
  * @param length Length of the current `password`
  * @param password The candidate password to match
  */
-void try_crack_list_password(password_set_t *passwords, int length,
-                             char password[], pthread_t threads[],
-                             pthread_t thread_id) {
+void rec_crack_password(trie_node_t *passwords, int length, char password[]) {
 
   // Base Case: Password is at desired length. Try it!
   if (length == 0) {
@@ -201,46 +240,34 @@ void try_crack_list_password(password_set_t *passwords, int length,
     // Do the hash
     MD5((unsigned char *)password, PASSWORD_LENGTH, candidate_hash);
 
-    // Now check if the password set contains the hash of the candidate password
-    for (int i = 0; i < passwords->size; i++) {
-      if (memcmp(passwords->hashed_passwords[i], candidate_hash,
-                 MD5_DIGEST_LENGTH) == 0) {
-        // Match! Print the username and cracked password
-        printf("%s ", passwords->usernames[i]);
-        printf("%s\n", password);
+    // Check if the trie contains the hash of the candidate password
+    if (find(passwords, candidate_hash)) {
+      // Match! Print the username and cracked password
+      printf("%s\n", password);
 
-        // Increment number of cracked passwords
-        pthread_mutex_lock(&lock);
-        num_cracked++;
-
-        // Cancel other threads if all passwords have been cracked.
-        if (num_cracked == passwords->size) {
-          for (int i = 0; i < NUM_THREADS; i++) {
-            if (threads[i] != thread_id) {
-              pthread_cancel(threads[i]);
-            }
-          }
-
-          // Exit prematurely
-          pthread_exit(NULL);
-        }
-
-        pthread_mutex_unlock(&lock);
-      }
+      // Increment number of cracked passwords
+      pthread_mutex_lock(&count_lock);
+      count_cracked++;
+      pthread_mutex_unlock(&count_lock);
     }
 
-    // No match found. Return
     return;
   }
 
   // Try all letters for next position of password
-  for (int ascii = ASCII_LOWERCASE_A; ascii <= ASCII_LOWERCASE_Z; ascii++) {
+  for (int ascii = ASCII_LOWER_A; ascii <= ASCII_LOWER_Z; ascii++) {
+    // Terminate if all passwords have been cracked
+    // We intentionally disregard the lock here because
+    // we don't care if we miss an iteration of early termination
+    if (count_cracked == count_passwords) {
+      pthread_exit(NULL);
+    }
+
     // Append current letter to password
     password[PASSWORD_LENGTH - length] = (char)ascii;
 
     // Recursive call. Track the number of cracked passwords
-    try_crack_list_password(passwords, length - 1, password, threads,
-                            thread_id);
+    rec_crack_password(passwords, length - 1, password);
   }
 }
 
@@ -263,8 +290,8 @@ void *crack_password_worker(void *_args) {
   for (int ascii = args->start; ascii <= args->stop; ascii++) {
     // Generate permutations starting with `ascii`
     password_candidate[0] = ascii;
-    try_crack_list_password(args->passwords, PASSWORD_LENGTH - 1,
-                            password_candidate, args->threads, args->thread_id);
+    rec_crack_password(args->passwords, PASSWORD_LENGTH - 1,
+                       password_candidate);
   }
 
   // Exit thread when done
@@ -272,28 +299,26 @@ void *crack_password_worker(void *_args) {
 }
 
 /**
- * Crack all of the passwords in a set of passwords. The function should
- * print the username and cracked password for each user listed in
+ * Cracks all of the passwords in a set of passwords.
+ * Prints the username and cracked password for each user listed in
  * passwords, separated by a space character.
  *
  * \returns The number of passwords cracked in the list
  */
-int crack_password_list(password_set_t *passwords) {
-  // Divide the search space into 4 equal portions, as follows
-  // Thread 1: A B C D E F
-  // Thread 2: G H I J K L
-  // Thread 3: M N O P Q R S
-  // Thread 4: T U V W X Y Z
-  int search_start[] = {'a', 'g', 'm', 't'};
-  int search_stop[] = {'f', 'l', 's', 'z'};
+int crack_password_list(trie_node_t *passwords) {
+  // Divide the search space into 4 more or less equal portions:
+  // Thread 1: a b c d e f g
+  // Thread 2: h i j k l m n
+  // Thread 3: o p q r s t
+  // Thread 4: u v w x y z
+  int search_start[NUM_THREADS] = {'a', 'h', 'o', 'u'};
+  int search_stop[NUM_THREADS] = {'g', 'n', 't', 'z'};
 
-  // Initialize lock
-  pthread_mutex_init(&lock, NULL);
-
-  // Initialize threads
+  // Threads and their arguments
   pthread_t threads[NUM_THREADS];
   thread_arg_t args[NUM_THREADS];
 
+  // Set thread arguments and create threads
   for (int i = 0; i < NUM_THREADS; i++) {
     // Set arguments to pass to threads
     args[i].start = search_start[i];
@@ -318,12 +343,8 @@ int crack_password_list(password_set_t *passwords) {
     }
   }
 
-  // Clean up
-  free_password_set(passwords);
-  pthread_mutex_destroy(&lock);
-
   // Return the number of passwords cracked
-  return num_cracked;
+  return count_cracked;
 }
 
 /******************** Provided Code ***********************/
@@ -390,8 +411,8 @@ int main(int argc, char **argv) {
 
   } else if (strcmp(argv[1], "list") == 0) {
     // Make and initialize a password set
-    password_set_t passwords;
-    init_password_set(&passwords);
+    trie_node_t *passwords;
+    create(&passwords);
 
     // Open the password file
     FILE *password_file = fopen(argv[2], "r");
@@ -427,12 +448,12 @@ int main(int argc, char **argv) {
       }
 
       // Add the password to the password set
-      add_password(&passwords, username, password_hash);
+      add_password(passwords, username, password_hash);
       password_count++;
     }
 
     // Now run the password list cracker
-    int cracked = crack_password_list(&passwords);
+    int cracked = crack_password_list(passwords);
 
     printf("Cracked %d of %d passwords.\n", cracked, password_count);
 
