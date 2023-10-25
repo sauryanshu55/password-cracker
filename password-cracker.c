@@ -1,16 +1,20 @@
 #define _GNU_SOURCE
 #include <openssl/md5.h>
+#include <pthread.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+
 #define MAX_USERNAME_LENGTH 64
 #define PASSWORD_LENGTH 6
 
 #define ASCII_LOWERCASE_A 97
 #define ASCII_LOWERCASE_Z 122
+
+#define NUM_THREADS 4
 
 /************************* Part A *************************/
 
@@ -44,7 +48,7 @@ int try_crack_single_password(uint8_t *input_hash, char *output, int length,
     }
   }
 
-  // Try all letters for next position of password
+  // Recursive case: Try all letters for next position of password
   for (int ascii = ASCII_LOWERCASE_A; ascii <= ASCII_LOWERCASE_Z; ascii++) {
     // Append current letter to password
     password[PASSWORD_LENGTH - length] = (char)ascii;
@@ -65,13 +69,14 @@ int try_crack_single_password(uint8_t *input_hash, char *output, int length,
 /**
  * Find a six character lower-case alphabetic password that hashes
  * to the given hash value. Complete this function for part A of the lab.
- * \param input_hash  An array of MD5_DIGEST_LENGTH bytes that holds the hash of
- * a password \param output      A pointer to memory with space for a six
- * character password + '\0' \returns           0 if the password was cracked.
- * -1 otherwise.
+ * \param input_hash  An array of MD5_DIGEST_LENGTH bytes that
+ *                    holds the hash of a password
+ * \param output A pointer to memory with space for a six
+ *               character password + '\0'
+ * \returns 0 if the password was cracked. -1 otherwise.
  */
 int crack_single_password(uint8_t *input_hash, char *output) {
-  // Buffer to store password. Null-terminated.
+  // Null-terminated buffer to store password
   char password_candidate[PASSWORD_LENGTH + 1];
   password_candidate[PASSWORD_LENGTH] = '\0';
 
@@ -88,13 +93,24 @@ int crack_single_password(uint8_t *input_hash, char *output) {
  * This struct is the root of the data structure that will hold users and hashed
  * passwords. This could be any type of data structure you choose: list, array,
  * tree, hash table, etc. Implement this data structure for part B of the lab.
+ * TODO: Make this a hash table, maybe. Then document.
+ *
  */
 typedef struct password_set {
-  // You will need to fill in fields here
   char **usernames;
   uint8_t **hashed_passwords;
   int size;
 } password_set_t;
+
+/**
+ * Struct containing arguments passed to a thread
+ */
+typedef struct thread_arg {
+  int start;                 // The starting ASCII character
+  int stop;                  // The ending ASCII character
+  int num_cracked;           // Stores the number of passwords cracked
+  password_set_t *passwords; // Pointer to the set of passwords to crack
+} thread_arg_t;
 
 /**
  * Initialize a password set.
@@ -129,24 +145,27 @@ void free_password_set(password_set_t *passwords) {
  * Add a password to a password set
  * Complete this implementation for part B of the lab.
  *
- * \param passwords   A pointer to a password set initialized with the
- * function above. \param username    The name of the user being added. The
- * memory that holds this string's characters will be reused, so if you keep
- * a copy you must duplicate the string. I recommend calling strdup().
- * \param password_hash   An array of MD5_DIGEST_LENGTH bytes that holds the
- * hash of this user's password. The memory that holds this array will be
- * reused, so you must make a copy of this value if you retain it in your
- * data structure.
+ * \param passwords A pointer to a password set initialized
+ *                  with the function above.
+ * \param username  The name of the user being added.
+ *                  The memory that holds this string's characters will be
+ *                  reused, so if you keep a copy you must duplicate the string.
+ *                  I recommend calling strdup().
+ * \param password_hash  An array of MD5_DIGEST_LENGTH bytes
+ *                       that holds the hash of this user's password.
+ *                       The memory that holds this array will be reused, so you
+ *                       must make a copy of this value if you retain it in
+ *                        your data structure.
  */
 void add_password(password_set_t *passwords, char *username,
                   uint8_t *password_hash) {
   // Ask allocator for more space if necessary
   passwords->usernames =
-      realloc(passwords->usernames, sizeof(char **) * passwords->size + 1);
-  passwords->hashed_passwords = realloc(passwords->hashed_passwords,
-                                        sizeof(char **) * passwords->size + 1);
+      realloc(passwords->usernames, sizeof(char *) * (passwords->size + 1));
+  passwords->hashed_passwords = realloc(
+      passwords->hashed_passwords, sizeof(uint8_t *) * (passwords->size + 1));
 
-  // Allocate space for username and password
+  // Allocate space for a single username and password
   passwords->usernames[passwords->size] =
       malloc(sizeof(char) * strlen(username));
   passwords->hashed_passwords[passwords->size] =
@@ -209,28 +228,79 @@ int try_crack_list_password(password_set_t *passwords_set, int length,
   return num_cracked;
 }
 
-/**
- * Crack all of the passwords in a set of passwords. The function should print
- * the username and cracked password for each user listed in passwords,
- * separated by a space character. Complete this implementation for part B of
- * the lab.
- *
- * \returns The number of passwords cracked in the list
- */
-int crack_password_list(password_set_t *passwords) {
+void *crack_password_worker(void *_args) {
   // Buffer to store password. Null-terminated.
   char password_candidate[PASSWORD_LENGTH + 1];
   password_candidate[PASSWORD_LENGTH] = '\0';
 
-  // Recursively try out all possible permutations of letters
-  int num_cracked =
-      try_crack_list_password(passwords, PASSWORD_LENGTH, password_candidate);
+  // Cast argument to usable struct
+  thread_arg_t *args = (thread_arg_t *)_args;
+
+  // Generate all permutations in this search space
+  for (int ascii = args->start; ascii <= args->stop; ascii++) {
+    // Generate permutations starting with `ascii`
+    password_candidate[0] = ascii;
+    args->num_cracked += try_crack_list_password(
+        args->passwords, PASSWORD_LENGTH - 1, password_candidate);
+  }
+
+  // Exit thread when done
+  pthread_exit(NULL);
+}
+
+/**
+ * Crack all of the passwords in a set of passwords. The function should
+ * print the username and cracked password for each user listed in
+ * passwords, separated by a space character. Complete this implementation
+ * for part B of
+ *
+ * TODO: More comments
+ *
+ * \returns The number of passwords cracked in the list
+ */
+int crack_password_list(password_set_t *passwords) {
+  // Divide the search space into 4 equal portions, as follows
+  // Thread 1: A B C D E F
+  // Thread 2: G H I J K L
+  // Thread 3: M N O P Q R S
+  // Thread 4: T U V W X Y Z
+  int search_start[] = {'a', 'g', 'm', 't'};
+  int search_stop[] = {'f', 'l', 's', 'z'};
+
+  // Create threads
+  pthread_t threads[NUM_THREADS];
+  thread_arg_t args[NUM_THREADS];
+
+  // Set arguments to pass to thread
+  for (int i = 0; i < NUM_THREADS; i++) {
+    args[i].start = search_start[i];
+    args[i].stop = search_stop[i];
+    args[i].num_cracked = 0;
+    args[i].passwords = passwords;
+
+    if (pthread_create(&threads[i], NULL, crack_password_worker, &args[i])) {
+      perror("pthread create failed");
+      exit(EXIT_FAILURE);
+    }
+  }
+
+  // Join threads. Count the number of cracked passwords
+  int total_cracked = 0;
+  for (int i = 0; i < NUM_THREADS; i++) {
+    if (pthread_join(threads[i], NULL)) {
+      perror("pthread join failed");
+      exit(EXIT_FAILURE);
+    }
+
+    // Aggregate number of cracked passwords
+    total_cracked += args[i].num_cracked;
+  }
 
   // Free password set
   free_password_set(passwords);
 
   // Return the number of passwords cracked
-  return num_cracked;
+  return total_cracked;
 }
 
 /******************** Provided Code ***********************/
