@@ -1,4 +1,5 @@
 #define _GNU_SOURCE
+#include <ctype.h>
 #include <openssl/md5.h>
 #include <pthread.h>
 #include <stdbool.h>
@@ -88,58 +89,121 @@ int crack_single_password(uint8_t *input_hash, char *output) {
 }
 
 /********************* Parts B & C ************************/
+#define DIGIT_IDX_OFFSET 48    // Unicode of '0'
+#define LETTER_IDX_OFFSET 87   // Unicoode of 'a'
+#define MD5_STRING_LENGTH 32   // Length of an MD5 string
+#define MD5_NUM_CHARS (26 + 9) // Number of possible characters in an MD5 string
 
 /**
- * This struct is the root of the data structure that will hold users and hashed
- * passwords. This could be any type of data structure you choose: list, array,
- * tree, hash table, etc. Implement this data structure for part B of the lab.
- * TODO: Make this a hash table, maybe. Then document.
+ * A struct of a Trie node
+ */
+typedef struct trie_node {
+  // An array of paths that are trie nodes
+  struct trie_node *paths[MD5_NUM_CHARS];
+
+  // Data contained at this node
+  char *data;
+
+} trie_node_t;
+
+/**
+ * Maps a character to an index in an
+ * representing paths in a trie
  *
+ * @param c Character to convert
+ * @return int Index in an array of trie paths
  */
-typedef struct password_set {
-  char **usernames;
-  uint8_t **hashed_passwords;
-  int size;
-} password_set_t;
+int char_to_idx(char c) {
+  return c - (isdigit(c) ? DIGIT_IDX_OFFSET : LETTER_IDX_OFFSET);
+}
 
 /**
- * Struct containing arguments passed to a thread
- */
-typedef struct thread_arg {
-  int start;                 // The starting ASCII character
-  int stop;                  // The ending ASCII character
-  int num_cracked;           // Stores the number of passwords cracked
-  password_set_t *passwords; // Pointer to the set of passwords to crack
-} thread_arg_t;
-
-/**
- * Initialize a password set.
+ * Initializes a trie node
  * Complete this implementation for part B of the lab.
  *
  * \param passwords  A pointer to allocated memory that will hold a password set
  */
-void init_password_set(password_set_t *passwords) {
-  passwords->usernames = malloc(sizeof(char **));
-  passwords->hashed_passwords = malloc(sizeof(char **));
-  passwords->size = 0;
-};
+void create(trie_node_t **trie) {
+  *trie = malloc(sizeof(trie_node_t));
+  for (int i = 0; i < MD5_NUM_CHARS; i++) {
+    (*trie)->paths[i] = NULL;
+  }
+  (*trie)->data = NULL;
+}
+
+/**
+ * Inserts a value into a path in a trie
+ * determined by following the key
+ *
+ * @param trie Trie to insert into
+ * @param key Key that signifies path to follow in trie
+ * @param val Value to be inserted at end of path
+ */
+void insert(trie_node_t *trie, char *key, char *val) {
+  trie_node_t *cur_trie = trie;
+
+  // Traverse tree till leaf
+  for (int i = 0; i < MD5_STRING_LENGTH; i++) {
+
+    // Determine path to follow
+    int path = char_to_idx(key[i]);
+
+    // Allocate space if needed
+    if (cur_trie->paths[path] == NULL) {
+      create(&cur_trie->paths[path]);
+    }
+
+    // Follow path
+    cur_trie = cur_trie->paths[path];
+  }
+
+  // Add data to leaf
+  cur_trie->data = malloc(strlen(val));
+  cur_trie->data = strdup(val);
+}
+
+bool find(trie_node_t *trie, char *key) {
+  trie_node_t *cur_trie = trie;
+
+  for (int i = 0; i < MD5_STRING_LENGTH; i++) {
+    // Determine path to follow
+    int path = char_to_idx(key[i]);
+
+    // Terminate if no data is found
+    if (cur_trie->paths[path] == NULL)
+      return false;
+
+    // Follow path
+    cur_trie = cur_trie->paths[path];
+  }
+
+  // Print data when at leaf node
+  printf("%s ", cur_trie->data);
+  return true;
+}
 
 /**
  * Frees the fields of a password_set_t struct
  *
  * @param passwords Struct to free
  */
-void free_password_set(password_set_t *passwords) {
-  // Free individual usernames and passwords
-  for (int i = 0; i < passwords->size; i++) {
-    free(passwords->usernames[i]);
-    free(passwords->hashed_passwords[i]);
-  }
 
-  // Free the struct array fields
-  free(passwords->usernames);
-  free(passwords->hashed_passwords);
+void destroy(trie_node_t *passwords) {
+  // LATER
 }
+
+/**
+ * Struct containing arguments passed to a thread
+ */
+typedef struct thread_arg {
+  int start;              // The starting ASCII character
+  int stop;               // The ending ASCII character
+  int num_cracked;        // Stores the number of passwords cracked
+  trie_node_t *passwords; // Pointer to the set of passwords to crack
+} thread_arg_t;
+
+// Total number of passwords to crack
+int num_passwords = 0;
 
 /**
  * Add a password to a password set
@@ -157,25 +221,20 @@ void free_password_set(password_set_t *passwords) {
  *                       must make a copy of this value if you retain it in
  *                        your data structure.
  */
-void add_password(password_set_t *passwords, char *username,
-                  uint8_t *password_hash) {
-  // Ask allocator for more space if necessary
-  passwords->usernames =
-      realloc(passwords->usernames, sizeof(char *) * (passwords->size + 1));
-  passwords->hashed_passwords = realloc(
-      passwords->hashed_passwords, sizeof(uint8_t *) * (passwords->size + 1));
+void add_password(trie_node_t *passwords, char *username, char *password_hash) {
+  // Allocate space for username and hash
+  char *user = malloc(sizeof(char) * strlen(username));
+  char *hash = malloc(sizeof(char) * MD5_STRING_LENGTH);
 
-  // Allocate space for a single username and password
-  passwords->usernames[passwords->size] =
-      malloc(sizeof(char) * strlen(username));
-  passwords->hashed_passwords[passwords->size] =
-      malloc(sizeof(uint8_t) * MD5_DIGEST_LENGTH);
+  // Create copies
+  user = strdup(username);
+  hash = strdup(password_hash);
 
-  // Store username and hashed password in password set
-  passwords->usernames[passwords->size] = strdup(username);
-  memcpy(passwords->hashed_passwords[passwords->size], password_hash,
-         MD5_DIGEST_LENGTH);
-  passwords->size++;
+  // Insert into trie
+  insert(passwords, hash, user);
+
+  // Increment password count
+  num_passwords += 1;
 }
 
 /**
@@ -187,8 +246,7 @@ void add_password(password_set_t *passwords, char *username,
  * @param password The candidate password to match
  * @return The number of passwords cracked
  */
-int try_crack_list_password(password_set_t *passwords_set, int length,
-                            char password[]) {
+int rec_crack_password(trie_node_t *passwords, int length, char password[]) {
 
   // Base Case: Password is at desired length. Try it!
   if (length == 0) {
@@ -198,16 +256,18 @@ int try_crack_list_password(password_set_t *passwords_set, int length,
     // Do the hash
     MD5((unsigned char *)password, PASSWORD_LENGTH, candidate_hash);
 
-    // Now check if the password set contains the hash of the candidate password
-    for (int i = 0; i < passwords_set->size; i++) {
-      if (memcmp(passwords_set->hashed_passwords[i], candidate_hash,
-                 MD5_DIGEST_LENGTH) == 0) {
-        // Match! Print the username and cracked password
-        // Return 1 because we cracked 1 password
-        printf("%s ", passwords_set->usernames[i]);
-        printf("%s\n", password);
-        return 1;
-      }
+    // Get string representation of MD5
+    char md5_string[MD5_STRING_LENGTH + 1];
+    for (int i = 0; i < 16; ++i)
+      sprintf(&md5_string[i * 2], "%02x", (unsigned int)candidate_hash[i]);
+
+    // Now check if the password set contains the hash of the candidate
+    // password
+    if (find(passwords, md5_string)) {
+      // Match! Print the username and cracked password
+      // Return 1 because we cracked 1 password
+      printf("%s\n", password);
+      return 1;
     }
 
     // No match found. Return 0 because we cracked 0 passwords
@@ -221,7 +281,7 @@ int try_crack_list_password(password_set_t *passwords_set, int length,
     password[PASSWORD_LENGTH - length] = (char)ascii;
 
     // Recursive call. Track the number of cracked passwords
-    num_cracked += try_crack_list_password(passwords_set, length - 1, password);
+    num_cracked += rec_crack_password(passwords, length - 1, password);
   }
 
   // Return the number of passwords cracked
@@ -240,7 +300,7 @@ void *crack_password_worker(void *_args) {
   for (int ascii = args->start; ascii <= args->stop; ascii++) {
     // Generate permutations starting with `ascii`
     password_candidate[0] = ascii;
-    args->num_cracked += try_crack_list_password(
+    args->num_cracked += rec_crack_password(
         args->passwords, PASSWORD_LENGTH - 1, password_candidate);
   }
 
@@ -258,7 +318,7 @@ void *crack_password_worker(void *_args) {
  *
  * \returns The number of passwords cracked in the list
  */
-int crack_password_list(password_set_t *passwords) {
+int crack_password_list(trie_node_t *passwords) {
   // Divide the search space into 4 equal portions, as follows
   // Thread 1: A B C D E F
   // Thread 2: G H I J K L
@@ -297,7 +357,7 @@ int crack_password_list(password_set_t *passwords) {
   }
 
   // Free password set
-  free_password_set(passwords);
+  destroy(passwords);
 
   // Return the number of passwords cracked
   return total_cracked;
@@ -367,8 +427,8 @@ int main(int argc, char **argv) {
 
   } else if (strcmp(argv[1], "list") == 0) {
     // Make and initialize a password set
-    password_set_t passwords;
-    init_password_set(&passwords);
+    trie_node_t *passwords;
+    create(&passwords);
 
     // Open the password file
     FILE *password_file = fopen(argv[2], "r");
@@ -388,7 +448,7 @@ int main(int argc, char **argv) {
       char md5_string[MD5_DIGEST_LENGTH * 2 + 1];
 
       // Make space to hold the MD5 bytes
-      uint8_t password_hash[MD5_DIGEST_LENGTH];
+      // uint8_t password_hash[MD5_DIGEST_LENGTH];
 
       // Try to read. The space in the format string is required to eat the
       // newline
@@ -397,19 +457,19 @@ int main(int argc, char **argv) {
         exit(2);
       }
 
-      // Convert the MD5 string to MD5 bytes in our new node
-      if (md5_string_to_bytes(md5_string, password_hash) != 0) {
-        fprintf(stderr, "Error reading MD5\n");
-        exit(2);
-      }
+      // // Convert the MD5 string to MD5 bytes in our new node
+      // if (md5_string_to_bytes(md5_string, password_hash) != 0) {
+      //   fprintf(stderr, "Error reading MD5\n");
+      //   exit(2);
+      // }
 
       // Add the password to the password set
-      add_password(&passwords, username, password_hash);
+      add_password(passwords, username, md5_string);
       password_count++;
     }
 
     // Now run the password list cracker
-    int cracked = crack_password_list(&passwords);
+    int cracked = crack_password_list(passwords);
 
     printf("Cracked %d of %d passwords.\n", cracked, password_count);
 
