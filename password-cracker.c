@@ -287,7 +287,10 @@ int crack_password_list(password_set_t *passwords) {
   int search_start[] = {'a', 'g', 'm', 't'};
   int search_stop[] = {'f', 'l', 's', 'z'};
 
-  // Create threads
+  // Initialize lock
+  pthread_mutex_init(&lock, NULL);
+
+  // Initialize threads
   pthread_t threads[NUM_THREADS];
   thread_arg_t args[NUM_THREADS];
 
@@ -315,8 +318,9 @@ int crack_password_list(password_set_t *passwords) {
     }
   }
 
-  // Clean up malloc-ed memory
+  // Clean up
   free_password_set(passwords);
+  pthread_mutex_destroy(&lock);
 
   // Return the number of passwords cracked
   return num_cracked;
