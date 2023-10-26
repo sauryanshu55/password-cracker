@@ -124,16 +124,6 @@ typedef struct thread_arg {
 } thread_arg_t;
 
 /**
- * Initializes a trie node
- *
- * \param trie  A pointer to that will hold a trie
- */
-void create(trie_node_t **trie) {
-  // Allocate memory for trie
-  *trie = malloc(sizeof(trie_node_t));
-}
-
-/**
  * Inserts a value into a path in a trie
  * determined by following the key
  *
@@ -152,7 +142,7 @@ void insert(trie_node_t *trie, uint8_t *key, char *val) {
     // Allocate space if needed
     if (cur_trie->has_path[path] == 0) {
       cur_trie->has_path[path] = 1;
-      create(&cur_trie->paths[path]);
+      cur_trie->paths[path] = malloc(sizeof(trie_node_t));
     }
 
     // Follow path
@@ -413,7 +403,7 @@ int main(int argc, char **argv) {
   } else if (strcmp(argv[1], "list") == 0) {
     // Make and initialize a password set
     trie_node_t *passwords;
-    create(&passwords);
+    passwords = malloc(sizeof(trie_node_t));
 
     // Open the password file
     FILE *password_file = fopen(argv[2], "r");
