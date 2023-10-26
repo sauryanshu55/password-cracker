@@ -1,4 +1,5 @@
 #define _GNU_SOURCE
+#include <math.h>
 #include <openssl/md5.h>
 #include <pthread.h>
 #include <stdint.h>
@@ -12,6 +13,7 @@
 
 #define NUM_THREADS 4
 
+#define NUM_ENG_LETTERS 26
 #define ASCII_LOWER_A 97
 #define ASCII_LOWER_Z 122
 #define NUM_UNSIGNED_CHARS 256
@@ -89,37 +91,46 @@ int crack_single_password(uint8_t *input_hash, char *output) {
 
 /********************* Parts B & C ************************/
 
-// Global book-keeping of the number of cracked passwords at the current time
-// This is shared across threads, hence the associated lock
-int num_cracked = 0;
-pthread_mutex_t lock;
+// Total number of passwords to crack
+int count_passwords = 0;
+
+// Number of passwords already cracked
+// This resource is shared across threads, hence the lock
+pthread_mutex_t count_lock = PTHREAD_MUTEX_INITIALIZER;
+int count_cracked = 0;
+
+// Size of a search space
+int size_search_space;
 
 /**
- * A struct of a Trie node
+ * Struct of a Trie node
+ * \field paths An array of paths that are trie nodes
+ * \field data Data contained at this node
  */
 typedef struct trie_node {
-  // An array of paths that are trie nodes
   struct trie_node *paths[NUM_UNSIGNED_CHARS];
-
-  // Data contained at this node
+  int has_path[NUM_UNSIGNED_CHARS];
   char data[MAX_USERNAME_LENGTH];
-
 } trie_node_t;
+
+/**
+ * Struct of arguments to pass to a thread
+ * \field start The permutation to start searching
+ * \field passwords Pointer to the set of passwords to crack
+ */
+typedef struct thread_arg {
+  char start[PASSWORD_LENGTH];
+  trie_node_t *passwords;
+} thread_arg_t;
 
 /**
  * Initializes a trie node
  *
  * \param trie  A pointer to that will hold a trie
  */
-// TODO: Is there a better way? How to pass a pointer to allocated memory?
 void create(trie_node_t **trie) {
   // Allocate memory for trie
   *trie = malloc(sizeof(trie_node_t));
-
-  // Initialize all paths
-  for (int i = 0; i < NUM_UNSIGNED_CHARS; i++) {
-    (*trie)->paths[i] = NULL;
-  }
 }
 
 /**
@@ -139,7 +150,8 @@ void insert(trie_node_t *trie, uint8_t *key, char *val) {
     int path = key[i];
 
     // Allocate space if needed
-    if (cur_trie->paths[path] == NULL) {
+    if (cur_trie->has_path[path] == 0) {
+      cur_trie->has_path[path] = 1;
       create(&cur_trie->paths[path]);
     }
 
@@ -168,8 +180,9 @@ int find(trie_node_t *trie, uint8_t *key) {
     int path = key[i];
 
     // Terminate if no data is found
-    if (cur_trie->paths[path] == NULL)
+    if (cur_trie->has_path[path] == 0) {
       return 0;
+    }
 
     // Follow path
     cur_trie = cur_trie->paths[path];
@@ -181,37 +194,11 @@ int find(trie_node_t *trie, uint8_t *key) {
 }
 
 /**
- * Struct containing arguments passed to a thread
- */
-typedef struct thread_arg {
-  int start;              // The starting ASCII character
-  int stop;               // The ending ASCII character
-  trie_node_t *passwords; // Pointer to the set of passwords to crack
-} thread_arg_t;
-
-// Total number of passwords to crack
-int count_passwords = 0;
-
-// Number of passwords already cracked
-// This resource is shared across threads
-pthread_mutex_t count_lock = PTHREAD_MUTEX_INITIALIZER;
-int count_cracked = 0;
-
-/**
- * Add a password to a password set
- * Complete this implementation for part B of the lab.
+ * Adds a password to a password set
  *
- * \param passwords A pointer to a password set initialized
- *                  with the function above.
- * \param username  The name of the user being added.
- *                  The memory that holds this string's characters will be
- *                  reused, so if you keep a copy you must duplicate the string.
- *                  I recommend calling strdup().
- * \param password_hash  An array of MD5_DIGEST_LENGTH bytes
- *                       that holds the hash of this user's password.
- *                       The memory that holds this array will be reused, so you
- *                       must make a copy of this value if you retain it in
- *                        your data structure.
+ * \param passwords A pointer to a trie containing passwords
+ * \param username The name of the user being added
+ * \param password_hash Array of bytes holding user's hashed password
  */
 void add_password(trie_node_t *passwords, char *username,
                   uint8_t *password_hash) {
@@ -223,52 +210,50 @@ void add_password(trie_node_t *passwords, char *username,
 }
 
 /**
- * Attempt to find and crack a password
- * from a list of passwords
- *
- * @param passwords_set Set of usernames and passwords
- * @param length Length of the current `password`
- * @param password The candidate password to match
+ * @return int The size of a search space for a thread
+ * This should be always be 77,228,944
  */
-void rec_crack_password(trie_node_t *passwords, int length, char password[]) {
+int get_size_search_space() {
+  return (int)pow(NUM_ENG_LETTERS, PASSWORD_LENGTH) / NUM_THREADS;
+}
 
-  // Base Case: Password is at desired length. Try it!
-  if (length == 0) {
-    // This will hold the hash of the candidate password
-    uint8_t candidate_hash[MD5_DIGEST_LENGTH];
+/**
+ * Gets the next string in the sequence
+ * from "aaaaaa" to "zzzzzz"
+ *
+ * @param str The next string in sequence
+ */
+void increment(char str[]) {
+  int idx = PASSWORD_LENGTH - 1;
+  while (str[idx] == 'z') {
+    str[idx] = 'a';
+    idx--;
+  }
+  str[idx] += 1;
+}
 
-    // Do the hash
-    MD5((unsigned char *)password, PASSWORD_LENGTH, candidate_hash);
+/**
+ * Gets the search boundaries for all threads
+ *
+ * @param output Array to store output boundaries
+ */
+void generate_search_boundaries(char output[][PASSWORD_LENGTH]) {
+  // First candidate
+  char candidate[PASSWORD_LENGTH] = {'a', 'a', 'a', 'a', 'a', 'a'};
 
-    // Check if the trie contains the hash of the candidate password
-    if (find(passwords, candidate_hash)) {
-      // Match! Print the username and cracked password
-      printf("%s\n", password);
+  // Each thread takes `size_search_space` candidates
+  for (int i = 0; i < NUM_THREADS - 1; i++) {
+    // Stores first candidate as boundary
+    memcpy(output[i], candidate, PASSWORD_LENGTH);
 
-      // Increment number of cracked passwords
-      pthread_mutex_lock(&count_lock);
-      count_cracked++;
-      pthread_mutex_unlock(&count_lock);
+    // Go to next boundary
+    for (int j = 0; j < size_search_space; j++) {
+      increment(candidate);
     }
-
-    return;
   }
 
-  // Try all letters for next position of password
-  for (int ascii = ASCII_LOWER_A; ascii <= ASCII_LOWER_Z; ascii++) {
-    // Terminate if all passwords have been cracked
-    // We intentionally disregard the lock here because
-    // we don't care if we miss an iteration of early termination
-    if (count_cracked == count_passwords) {
-      pthread_exit(NULL);
-    }
-
-    // Append current letter to password
-    password[PASSWORD_LENGTH - length] = (char)ascii;
-
-    // Recursive call. Track the number of cracked passwords
-    rec_crack_password(passwords, length - 1, password);
-  }
+  // Last thread
+  memcpy(output[NUM_THREADS - 1], candidate, PASSWORD_LENGTH);
 }
 
 /**
@@ -279,19 +264,41 @@ void rec_crack_password(trie_node_t *passwords, int length, char password[]) {
  * @return void* Thread exits
  */
 void *crack_password_worker(void *_args) {
-  // Buffer to store password. Null-terminated.
-  char password_candidate[PASSWORD_LENGTH + 1];
-  password_candidate[PASSWORD_LENGTH] = '\0';
-
   // Cast argument to usable struct
   thread_arg_t *args = (thread_arg_t *)_args;
 
-  // Generate all permutations in this search space
-  for (int ascii = args->start; ascii <= args->stop; ascii++) {
-    // Generate permutations starting with `ascii`
-    password_candidate[0] = ascii;
-    rec_crack_password(args->passwords, PASSWORD_LENGTH - 1,
-                       password_candidate);
+  // This will hold the current candidate password
+  char password[PASSWORD_LENGTH + 1];
+  password[PASSWORD_LENGTH] = '\0';
+  memcpy(password, args->start, PASSWORD_LENGTH);
+
+  // This will hold the hash of the candidate password
+  uint8_t candidate_hash[MD5_DIGEST_LENGTH];
+
+  // Search and crack passwords
+  for (int i = 0; i < size_search_space; i++) {
+    // Terminate if all passwords have been cracked
+    // We intentionally disregard the lock here
+    if (count_cracked == count_passwords) {
+      pthread_exit(NULL);
+    }
+
+    // Do the hash
+    MD5((unsigned char *)password, PASSWORD_LENGTH, candidate_hash);
+
+    // Check if the trie contains the hash of the candidate password
+    if (find(args->passwords, candidate_hash)) {
+      // Found! Print cracked password
+      printf("%s\n", password);
+
+      // Increment number of cracked passwords
+      pthread_mutex_lock(&count_lock);
+      count_cracked++;
+      pthread_mutex_unlock(&count_lock);
+    }
+
+    // Go to next password
+    increment(password);
   }
 
   // Exit thread when done
@@ -306,13 +313,12 @@ void *crack_password_worker(void *_args) {
  * \returns The number of passwords cracked in the list
  */
 int crack_password_list(trie_node_t *passwords) {
-  // Divide the search space into 4 more or less equal portions:
-  // Thread 1: a b c d e f g
-  // Thread 2: h i j k l m n
-  // Thread 3: o p q r s t
-  // Thread 4: u v w x y z
-  int search_start[NUM_THREADS] = {'a', 'h', 'o', 'u'};
-  int search_stop[NUM_THREADS] = {'g', 'n', 't', 'z'};
+  // Calculate search space size
+  size_search_space = get_size_search_space();
+
+  // Divide the search space into 4 exactly equal portions
+  char search_boundaries[NUM_THREADS][PASSWORD_LENGTH];
+  generate_search_boundaries(search_boundaries);
 
   // Threads and their arguments
   pthread_t threads[NUM_THREADS];
@@ -321,13 +327,8 @@ int crack_password_list(trie_node_t *passwords) {
   // Set thread arguments and create threads
   for (int i = 0; i < NUM_THREADS; i++) {
     // Set arguments to pass to threads
-    args[i].start = search_start[i];
-    args[i].stop = search_stop[i];
+    memcpy(args[i].start, search_boundaries[i], PASSWORD_LENGTH);
     args[i].passwords = passwords;
-    args[i].thread_id = threads[i];
-    for (int i = 0; i < NUM_THREADS; i++) {
-      args[i].threads[i] = threads[i];
-    }
 
     if (pthread_create(&threads[i], NULL, crack_password_worker, &args[i])) {
       perror("pthread create failed");
